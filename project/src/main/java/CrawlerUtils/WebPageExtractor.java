@@ -27,13 +27,22 @@ public class WebPageExtractor {
 		this.doc = response.parse();
 
 		String lastModifiedStr = response.header("Last-Modified");
+		String dateStr = response.header("Date"); // <-- get the Date header
+
 		if (lastModifiedStr != null && !lastModifiedStr.isEmpty()) {
 			try {
 				this.lastModified = Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(lastModifiedStr));
 			} catch (DateTimeParseException e) {
-				this.lastModified = null;}
-		} else {
-			this.lastModified = null;
+				this.lastModified = null;
+			}
+		}
+
+		if (this.lastModified == null && dateStr != null && !dateStr.isEmpty()) {
+			try {
+				this.lastModified = Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(dateStr));
+			} catch (DateTimeParseException e) {
+				this.lastModified = null;
+			}
 		}
 	}
 
@@ -82,6 +91,10 @@ public class WebPageExtractor {
 
 	public String getCurrentURL() {
 		return this.doc.location();
+	}
+
+	public String extractTitle() {
+		return this.doc.title() == null ? "" : this.doc.title();
 	}
 
 	public Instant getLastModified() {

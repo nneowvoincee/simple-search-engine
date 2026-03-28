@@ -2,7 +2,6 @@ import CrawlerUtils.Utils;
 import CrawlerUtils.WebPageExtractor;
 import org.mapdb.DB;
 import org.mapdb.DBMaker;
-import org.mapdb.HTreeMap;
 import org.mapdb.Serializer;
 
 import java.io.IOException;
@@ -15,6 +14,8 @@ public class Crawler {
     private final int numWorker = 10;
     private final DB db;
     private final Map<String, WebPageData> map;
+    private final Map<String, Integer> urlToPageId;
+    private final Map<Integer, String> pageIdToUrl;
     private Indexer indexer;
 
     @SuppressWarnings("unchecked")
@@ -25,8 +26,17 @@ public class Crawler {
                 .keySerializer(Serializer.STRING)
                 .valueSerializer(Serializer.JAVA)
                 .createOrOpen();
+        // Explicit URL <-> pageID mappings required by the project spec.
+        this.urlToPageId = (Map<String, Integer>) db.hashMap("UrlToPageId")
+                .keySerializer(Serializer.STRING)
+                .valueSerializer(Serializer.INTEGER)
+                .createOrOpen();
+        this.pageIdToUrl = (Map<Integer, String>) db.hashMap("PageIdToUrl")
+                .keySerializer(Serializer.INTEGER)
+                .valueSerializer(Serializer.STRING)
+                .createOrOpen();
 
-        this.indexer = new Indexer(this.db);    // 现在什么都没有
+        this.indexer = new Indexer(this.db);
 
         // close database before shutdown
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -69,21 +79,36 @@ public class Crawler {
                 if (!success) {
                     continue;
                 }
-                temp = new WebPageData(currentURL, this.extractContent(), this.extractLinks(), this.getLastModified());
+                String content = this.extractContent();
+                String title = this.extractTitle();
+                temp = new WebPageData(currentURL, title, content, this.extractLinks(), this.getLastModified(), content.length());
             }
 
             numFetched += 1;
             temp.setPageID(numFetched);
             map.put(currentURL, temp);
+            urlToPageId.put(currentURL, numFetched);
+            pageIdToUrl.put(numFetched, currentURL);
+            // Keep crawler + indexer integrated
+            indexer.process(temp);
             fetchedPages.add(currentURL);
             pendingPage.addAll(temp.getSubLink());
         }
 
-        // 1. 删除不在 fetchedPages 中的页面（使用 stream 收集待删除键）
         Set<String> toRemove = map.keySet().stream()
                 .filter(key -> !fetchedPages.contains(key))
                 .collect(Collectors.toSet());
-        toRemove.forEach(map::remove);
+        toRemove.forEach(key -> {
+            WebPageData removed = map.remove(key);
+            Integer oldPageId = urlToPageId.remove(key);
+            if (oldPageId != null && oldPageId > k) {   // oldPageId has been overwrite
+                pageIdToUrl.remove(oldPageId);
+                this.indexer.removePage(oldPageId);
+            } else if (removed != null && removed.getPageID() > k) {
+                pageIdToUrl.remove(removed.getPageID());
+                this.indexer.removePage(removed.getPageID());
+            }
+        });
 
         map.entrySet().stream()
                 .filter(entry -> fetchedPages.contains(entry.getKey()))
@@ -126,6 +151,13 @@ public class Crawler {
         return this.we.extractContent();
     }
 
+    public String extractTitle() {
+        if (this.we == null) {
+            throw new NullPointerException("Extract before fetch (or failed fetching is not handled)");
+        }
+        return this.we.extractTitle();
+    }
+
     public String getCurrentURL() {
         if (this.we == null) {
             throw new NullPointerException("Get before fetch (or failed fetching was not handled)");
@@ -143,7 +175,7 @@ public class Crawler {
     public static void main(String[] args) {
         Crawler crawler = new Crawler("database.db");
 
-        crawler.fetchPagesBFS("http://www.cs.ust.hk/~dlee/4321/", 3);
+        crawler.fetchPagesBFS("https://www.cse.ust.hk/~kwtleung/COMP4321/testpage.htm", 30);
         crawler.printAllData();
 
     }

@@ -1,0 +1,174 @@
+COMP4321 Phase 1 - JDBM/MapDB Database Schema Design
+
+Overview
+This project implements a BFS spider integrated with an indexer.
+The crawler fetches pages, extracts metadata/content/links, and stores page records.
+The indexer removes stop words, stems terms with Porter, and builds forward/inverted indexes.
+
+Database Engine
+- Implementation library used in code: MapDB (persistent file DB)
+- DB file: database.db
+- Access pattern: hash maps (createOrOpen), committed after crawl
+
+========================================================================
+1) Database Tables (Maps)
+========================================================================
+
+1. WebPageData
+- Key type: String (URL)
+- Value type: WebPageData (Serializable object)
+- Purpose:
+  Stores canonical page-level information used by crawler, exporter, and retrieval.
+- Stored fields in WebPageData:
+  - pageID (int)
+  - url (String)
+  - pageTitle (String)
+  - pageText (String)
+  - subLink (Vector<String>)   // child links
+  - lastModified (Instant)
+  - pageSize (int)
+
+2. BodyInverted
+- Key type: String (stemmed term)
+- Value type: Map<Integer, List<Integer>>
+  - inner key: pageID (Integer)
+  - inner value: positions of this term in body text (List<Integer>)
+- Purpose:
+  Body inverted index with positional postings for phrase support.
+
+3. TitleInverted
+- Key type: String (stemmed term)
+- Value type: Map<Integer, List<Integer>>
+- Purpose:
+  Title inverted index with positional postings for phrase support in title.
+
+4. BodyForward
+- Key type: Integer (pageID)
+- Value type: Map<String, Integer>
+  - inner key: stemmed term
+  - inner value: term frequency in body
+- Purpose:
+  Forward index for body terms; supports top-keyword output and ranking features.
+
+5. TitleForward
+- Key type: Integer (pageID)
+- Value type: Map<String, Integer>
+- Purpose:
+  Forward index for title terms.
+
+6. BodyMaxTf
+- Key type: Integer (pageID)
+- Value type: Integer (max term frequency in body)
+- Purpose:
+  Supports tf normalization for vector space model (tfxidf / max(tf)).
+
+7. TitleMaxTf
+- Key type: Integer (pageID)
+- Value type: Integer (max term frequency in title)
+- Purpose:
+  Supports title weighting/normalization.
+
+8. PageBodyTerms
+- Key type: Integer (pageID)
+- Value type: Set<String> (all unique indexed body terms for page)
+- Purpose:
+  Tracks previous indexed terms to remove stale body postings when a page is re-crawled.
+
+9. PageTitleTerms
+- Key type: Integer (pageID)
+- Value type: Set<String> (all unique indexed title terms for page)
+- Purpose:
+  Tracks previous indexed terms to remove stale title postings when a page is re-crawled.
+
+========================================================================
+2) Mapping Tables Requirement (URL<=>pageID and word<=>wordID)
+========================================================================
+
+Current implementation status:
+- URL -> pageID: available through WebPageData map
+  (lookup URL key, read value.pageID)
+- pageID -> URL: not stored as a dedicated map
+- word <-> wordID: not implemented as dedicated maps
+
+Rationale:
+- Explicit bidirectional maps give O(1) conversion and satisfy schema requirements directly.
+- They simplify retrieval and result rendering pipelines.
+
+========================================================================
+3) Crawler Flow (BFS + incremental update)
+========================================================================
+
+Input:
+- seed URL
+- target page count k (Phase 1 uses k = 30)
+
+Procedure:
+1. Initialize BFS queue with seed URL.
+2. Pop URL from queue.
+3. Skip if already fetched in this run (cycle handling).
+4. Check DB for existing page by URL:
+   - If not found: fetch.
+   - If found and remote page modified (Last-Modified newer): fetch and re-index.
+   - Else: reuse existing record.
+5. On fetch:
+   - Extract title, text body, child links, last-modified, size.
+   - Assign pageID in BFS order.
+   - Save to WebPageData.
+   - Call Indexer.process(page).
+6. Push child links into BFS queue.
+7. Stop when k pages indexed or queue exhausted.
+8. Commit DB.
+
+Cycle and robustness behavior:
+- `fetchedPages` set prevents infinite loops on cyclic links during one crawl run.
+- Re-crawl support:
+  old postings are removed (via PageBodyTerms/PageTitleTerms), then new postings inserted.
+
+========================================================================
+4) Indexer Flow
+========================================================================
+
+For each page:
+1. Read body/title text.
+2. Tokenize with regex [A-Za-z0-9]+.
+3. Convert to lowercase.
+4. Remove stop words (from stopwords.txt).
+5. Stem tokens using Porter.
+6. Record positions for each stem (for phrase support).
+7. Update:
+   - BodyInverted / TitleInverted
+   - BodyForward / TitleForward
+   - BodyMaxTf / TitleMaxTf
+   - PageBodyTerms / PageTitleTerms
+
+========================================================================
+5) Why this schema
+========================================================================
+
+1. Supports Phase 1 output directly:
+- WebPageData + BodyForward provides title/URL/date/size/top keywords/child links.
+
+2. Supports phrase search in future phases:
+- Positional postings in BodyInverted and TitleInverted.
+
+3. Supports vector space ranking in future phases:
+- tf in forward maps and max(tf) maps.
+
+4. Supports recrawl consistency:
+- Per-page term sets allow safe deletion of stale postings.
+
+========================================================================
+6) Test Program Data Usage (SpiderResultExporter)
+========================================================================
+
+Read tables:
+- WebPageData
+- BodyForward
+
+Output rules implemented:
+- Up to 30 pages (sorted by pageID/BFS order)
+- Up to 10 keywords per page
+- Up to 10 child links per page
+- Missing fields as N/A
+- Separator line:
+  --------------------------------------------------
