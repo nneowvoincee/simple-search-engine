@@ -7,26 +7,24 @@ import org.mapdb.Serializer;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 public class Crawler {
-    private WebPageExtractor we;
     private final int numWorker = 10;
     private final DB db;
     private final Map<String, WebPageData> map;
     private final Map<String, Integer> urlToPageId;
     private final Map<Integer, String> pageIdToUrl;
-    private Indexer indexer;
+    private final Indexer indexer;
 
     @SuppressWarnings("unchecked")
     public Crawler(String databasePath) {
-        this.db = DBMaker.fileDB(databasePath)
-                .make();
+        this.db = DBMaker.fileDB(databasePath).make();
         this.map = (Map<String, WebPageData>) db.hashMap("WebPageData")
                 .keySerializer(Serializer.STRING)
                 .valueSerializer(Serializer.JAVA)
                 .createOrOpen();
-        // Explicit URL <-> pageID mappings required by the project spec.
         this.urlToPageId = (Map<String, Integer>) db.hashMap("UrlToPageId")
                 .keySerializer(Serializer.STRING)
                 .valueSerializer(Serializer.INTEGER)
@@ -35,10 +33,8 @@ public class Crawler {
                 .keySerializer(Serializer.INTEGER)
                 .valueSerializer(Serializer.STRING)
                 .createOrOpen();
-
         this.indexer = new Indexer(this.db);
 
-        // close database before shutdown
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (!db.isClosed()) {
                 db.close();
@@ -46,140 +42,180 @@ public class Crawler {
         }));
     }
 
-    public boolean fetch(String url) {
-        try {
-            this.we = new WebPageExtractor(url);
-        } catch (IOException e) {
-            this.we = null;
-            return false;
-        }
-        return true;
-    }
+    /**
+     * Parallel BFS crawl that guarantees reproducible ordering across runs.
+     *
+     * Ordering rules:
+     *   1. Process pages level by level (BFS).
+     *   2. Within the same level, URLs are visited in the order their
+     *      parent pages appear in the previous level.
+     *   3. Within the same parent page, child links keep their original
+     *      order as extracted from the HTML.
+     *   4. When a URL is discovered for the first time, its position is
+     *      preserved; subsequent duplicates are ignored.
+     *
+     * All HTTP requests are issued in parallel, but the assignment of
+     * page IDs and all writes to the indexes are performed sequentially
+     * (by the main thread), completely eliminating race conditions.
+     */
     public void fetchPagesBFS(String entryPoint, int k) {
-        int numFetched = 0;
-        String currentURL = null;
-        Set<String> fetchedPages = new LinkedHashSet<>();
-        Queue<String> pendingPage = new ArrayDeque<>();
+        ExecutorService executor = Executors.newFixedThreadPool(numWorker);
+        try {
+            // Track successfully crawled URLs (insertion order preserved)
+            Set<String> fetchedPages = new LinkedHashSet<>();
+            int numFetched = 0;
 
-        pendingPage.add(entryPoint);
+            // Current BFS layer – ordered list of URLs (no duplicates)
+            List<String> currentLayer = new ArrayList<>();
+            currentLayer.add(entryPoint);
 
-        while (numFetched < k) {
-            if (pendingPage.isEmpty()) {
-                break;
-            }
-
-            currentURL = pendingPage.remove();
-            if (fetchedPages.contains(currentURL)) {
-                continue;
-            }
-
-            WebPageData temp = (WebPageData) map.get(currentURL);
-            if (temp == null || Utils.isModified(currentURL, temp.getLastModified())) {
-                boolean success = this.fetch(currentURL);
-                if (!success) {
-                    continue;
+            while (!currentLayer.isEmpty() && numFetched < k) {
+                // Remove URLs that have already been crawled, preserving order
+                List<String> toProcess = new ArrayList<>();
+                for (String url : currentLayer) {
+                    if (!fetchedPages.contains(url)) {
+                        toProcess.add(url);
+                    }
                 }
-                String content = this.extractContent();
-                String title = this.extractTitle();
-                temp = new WebPageData(currentURL, title, content, this.extractLinks(), this.getLastModified(), content.length());
-            }
+                if (toProcess.isEmpty()) {
+                    break;
+                }
 
-            numFetched += 1;
-            temp.setPageID(numFetched);
-            map.put(currentURL, temp);
-            urlToPageId.put(currentURL, numFetched);
-            pageIdToUrl.put(numFetched, currentURL);
-            // Keep crawler + indexer integrated
-            indexer.process(temp);
-            fetchedPages.add(currentURL);
-            pendingPage.addAll(temp.getSubLink());
+                // ─── Phase 1: parallel HTTP fetching ───
+                List<Future<WebPageData>> futures = new ArrayList<>(toProcess.size());
+                for (String url : toProcess) {
+                    Future<WebPageData> future = executor.submit(() -> {
+                        // Check local cache (MapDB reads are thread‑safe)
+                        WebPageData existing = map.get(url);
+                        boolean needFetch = (existing == null)
+                                || Utils.isModified(url, existing.getLastModified());
+                        if (needFetch) {
+                            try {
+                                return fetchAndExtract(url);   // performs real HTTP request
+                            } catch (IOException e) {
+                                return null;                   // network failure
+                            }
+                        } else {
+                            return existing;                   // cache hit, no change
+                        }
+                    });
+                    futures.add(future);
+                }
+
+                // ─── Phase 2: sequential processing (single‑threaded) ───
+                List<String> nextLayer = new ArrayList<>();
+                // Preserve insertion order and skip duplicates for the next layer
+                Set<String> seenInNextLayer = new LinkedHashSet<>();
+
+                for (int i = 0; i < toProcess.size() && numFetched < k; i++) {
+                    String url = toProcess.get(i);
+                    WebPageData data;
+                    try {
+                        data = futures.get(i).get();   // block until fetch completes
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    } catch (ExecutionException e) {
+                        System.err.println("Unexpected error for " + url + ": " + e.getCause());
+                        continue;
+                    }
+
+                    if (data == null) {
+                        // Fetch failed – skip this URL without allocating a page ID
+                        continue;
+                    }
+
+                    // Assign page ID strictly in BFS discovery order
+                    numFetched++;
+                    int pageId = numFetched;
+                    data.setPageID(pageId);
+
+                    // Update persistent storage (single‑threaded, no lock needed)
+                    map.put(url, data);
+                    urlToPageId.put(url, pageId);
+                    pageIdToUrl.put(pageId, url);
+                    indexer.process(data);
+                    fetchedPages.add(url);
+
+                    // Enqueue child links in their original extraction order
+                    if (data.getSubLink() != null) {
+                        for (String childUrl : data.getSubLink()) {
+                            if (!fetchedPages.contains(childUrl) && seenInNextLayer.add(childUrl)) {
+                                nextLayer.add(childUrl);
+                            }
+                        }
+                    }
+                }
+
+                // If enough pages have been crawled, cancel any outstanding futures
+                if (numFetched >= k) {
+                    for (Future<WebPageData> f : futures) {
+                        f.cancel(true);
+                    }
+                }
+
+                currentLayer = nextLayer;
+            }
+        } finally {
+            executor.shutdown();
+            try {
+                executor.awaitTermination(10, TimeUnit.MINUTES);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
 
-        Set<String> toRemove = map.keySet().stream()
-                .filter(key -> !fetchedPages.contains(key))
-                .collect(Collectors.toSet());
-        toRemove.forEach(key -> {
-            WebPageData removed = map.remove(key);
-            Integer oldPageId = urlToPageId.remove(key);
-            if (oldPageId != null && oldPageId > k) {   // oldPageId has been overwrite
-                pageIdToUrl.remove(oldPageId);
-                this.indexer.removePage(oldPageId);
-            } else if (removed != null && removed.getPageID() > k) {
-                pageIdToUrl.remove(removed.getPageID());
-                this.indexer.removePage(removed.getPageID());
-            }
-        });
+        // ─── Post‑processing: remove pages not covered by this crawl ───
+        // All operations from here on are single‑threaded and thus race‑condition free.
 
-        map.entrySet().stream()
-                .filter(entry -> fetchedPages.contains(entry.getKey()))
-                .forEach(entry -> {
-                    WebPageData data = entry.getValue();
-                    Vector<String> subLinks = data.getSubLink();
-                    subLinks.removeIf(link -> !fetchedPages.contains(link));
-                });
+        // Determine which pages were successfully crawled (page ID ≤ k)
+        Set<String> validPages = map.keySet().stream()
+                .filter(key -> urlToPageId.get(key) != null && urlToPageId.get(key) <= k)
+                .collect(Collectors.toSet());
+
+        map.keySet().removeIf(key -> !validPages.contains(key));
+        urlToPageId.keySet().removeIf(key -> !validPages.contains(key));
+        pageIdToUrl.keySet().removeIf(id -> !validPages.contains(pageIdToUrl.get(id)));
+
+        // Clean stale child links so they only point to crawled pages
+        for (WebPageData data : map.values()) {
+            Vector<String> links = data.getSubLink();
+            if (links != null) {
+                links.removeIf(link -> !validPages.contains(link));
+            }
+        }
 
         db.commit();
     }
 
+    /**
+     * Stateless helper that fetches a URL and extracts all required data.
+     * A new WebPageExtractor is created for every call, so there is no
+     * shared mutable state that could cause race conditions.
+     */
+    private WebPageData fetchAndExtract(String url) throws IOException {
+        WebPageExtractor we = new WebPageExtractor(url);
+        String content = we.extractContent();
+        String title = we.extractTitle();
+        Vector<String> links = we.extractLinks();
+        Instant lastModified = we.getLastModified();
+        int pageSize = content.length();
+        return new WebPageData(url, title, content, links, lastModified, pageSize);
+    }
+
+    // ─── Debugging output ─────────────────────────────────────────────────
+
     public void printAllData() {
         for (Map.Entry<String, WebPageData> entry : this.map.entrySet()) {
-            String url = entry.getKey();
-            WebPageData data = (WebPageData) entry.getValue();
-            System.out.println("URL: " + url);
-            System.out.println("Data: " + data.getPageID());  // 确保 WebPageData 有合适的 toString()
+            System.out.println("URL: " + entry.getKey());
+            System.out.println("Data pageID: " + entry.getValue().getPageID());
             System.out.println("------------------------");
         }
-    }
-    public Vector<String> extractLinks() {
-        if (this.we == null) {
-            throw new NullPointerException("Extract before fetch (or failed fetching is not handled)");
-        }
-        return this.we.extractLinks();
-    }
-
-    public Vector<String> extractWords() {
-        if (this.we == null) {
-            throw new NullPointerException("Extract before fetch (or failed fetching is not handled)");
-        }
-        return this.we.extractWords();
-    }
-
-    public String extractContent() {
-        if (this.we == null) {
-            throw new NullPointerException("Extract before fetch (or failed fetching is not handled)");
-        }
-        return this.we.extractContent();
-    }
-
-    public String extractTitle() {
-        if (this.we == null) {
-            throw new NullPointerException("Extract before fetch (or failed fetching is not handled)");
-        }
-        return this.we.extractTitle();
-    }
-
-    public String getCurrentURL() {
-        if (this.we == null) {
-            throw new NullPointerException("Get before fetch (or failed fetching was not handled)");
-        }
-        return this.we.getCurrentURL();
-    }
-
-    public Instant getLastModified() {
-        if (this.we == null) {
-            throw new NullPointerException("Get before fetch (or failed fetching was not handled)");
-        }
-        return this.we.getLastModified();
     }
 
     public static void main(String[] args) {
         Crawler crawler = new Crawler("database.db");
-
         crawler.fetchPagesBFS("https://www.cse.ust.hk/~kwtleung/COMP4321/testpage.htm", 300);
         crawler.printAllData();
-
-
     }
 }
-
-	

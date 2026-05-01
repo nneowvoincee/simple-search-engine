@@ -9,17 +9,8 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Optional;
 import java.net.MalformedURLException;
-import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.format.DateTimeFormatter;
-import java.util.List;
-import java.util.Map;
 
 public class Utils {
     public static boolean isWebPageURL(String url) {
@@ -76,7 +67,12 @@ public class Utils {
                     DateTimeFormatter.RFC_1123_DATE_TIME.parse(lastModifiedHeader.get())
             );
 
-            return remoteLastModified.isAfter(storedLastModified);
+            if (!remoteLastModified.isAfter(storedLastModified)) {
+                System.out.println(url + " not modified.");
+                return false;
+            } else {
+                return true;
+            }
 
         } catch (Exception e) {
             e.printStackTrace();
