@@ -196,11 +196,11 @@ public class Indexer {
         return max;
     }
 
-    private static Set<String> loadStopWords() {
+    private Set<String> loadStopWords() {
         Set<String> sw = new HashSet<>();
         try (InputStream in = Webserver.class.getClassLoader().getResourceAsStream("stopwords.txt")) {
             if (in != null) {
-                // readStopWords(in, sw);
+                readStopWords(in, sw);
                 return sw;
             }
         } catch (IOException e) {
