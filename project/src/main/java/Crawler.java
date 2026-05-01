@@ -175,8 +175,9 @@ public class Crawler {
     public static void main(String[] args) {
         Crawler crawler = new Crawler("database.db");
 
-        crawler.fetchPagesBFS("https://www.cse.ust.hk/~kwtleung/COMP4321/testpage.htm", 30);
+        crawler.fetchPagesBFS("https://www.cse.ust.hk/~kwtleung/COMP4321/testpage.htm", 300);
         crawler.printAllData();
+
 
     }
 }
