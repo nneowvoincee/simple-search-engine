@@ -196,29 +196,19 @@ public class Indexer {
         return max;
     }
 
-    private Set<String> loadStopWords() {
-        Set<String> result = new HashSet<>();
-        // Prefer classpath loading so it works after packaging.
-        try (InputStream in = Indexer.class.getClassLoader().getResourceAsStream("stopwords.txt")) {
+    private static Set<String> loadStopWords() {
+        Set<String> sw = new HashSet<>();
+        try (InputStream in = Webserver.class.getClassLoader().getResourceAsStream("stopwords.txt")) {
             if (in != null) {
-                readStopWords(in, result);
-                return result;
+                // readStopWords(in, sw);
+                return sw;
             }
-        } catch (IOException ignored) {
-            // fallback to file path below
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-
-        // Fallback for local runs in source layout.
-        File fallback = new File("src/main/java/stopwords.txt");
-        if (!fallback.exists()) {
-            return result;
-        }
-        try (InputStream in = new FileInputStream(fallback)) {
-            readStopWords(in, result);
-        } catch (IOException ignored) {
-            // keep an empty stopword set if reading fails
-        }
-        return result;
+        System.err.println("FATAL: stopwords.txt not found in classpath! Make sure it is in src/main/resources/");
+        System.exit(1);
+        return sw;
     }
 
     private void readStopWords(InputStream in, Set<String> stopwordSet) throws IOException {
