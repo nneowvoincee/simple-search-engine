@@ -133,6 +133,7 @@ public class Webserver {
 
         HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
         server.createContext("/api/search", Webserver::handleSearch);
+        server.createContext("/api/keywords", Webserver::handleKeywords);  // 新增
         server.setExecutor(null);
         server.start();
         System.out.println("✅ 服务启动成功: http://localhost:8080");
@@ -170,6 +171,50 @@ public class Webserver {
 
         List<SearchResult> results = search(q.trim());
         sendJson(ex, 200, toJson(results));
+    }
+
+    private static void handleKeywords(HttpExchange ex) throws IOException {
+        // CORS 头
+        ex.getResponseHeaders().add("Access-Control-Allow-Origin", "*");
+        ex.getResponseHeaders().add("Access-Control-Allow-Methods", "GET,OPTIONS");
+        ex.getResponseHeaders().add("Access-Control-Allow-Headers", "Content-Type");
+
+        if ("OPTIONS".equals(ex.getRequestMethod())) {
+            ex.sendResponseHeaders(204, -1);
+            ex.close();
+            return;
+        }
+        if (!"GET".equals(ex.getRequestMethod())) {
+            sendJson(ex, 405, "{\"error\":\"Method Not Allowed\"}");
+            return;
+        }
+
+        // 获取所有词干（去重）
+        Set<String> allKeywords = new TreeSet<>();        // TreeSet 自动排序
+        allKeywords.addAll(bodyInverted.keySet());
+        allKeywords.addAll(titleInverted.keySet());
+
+        // 构造 JSON
+        StringBuilder json = new StringBuilder();
+        json.append("{\"keywords\":[");
+        Iterator<String> it = allKeywords.iterator();
+        while (it.hasNext()) {
+            json.append('"').append(jsEscape(it.next())).append('"');
+            if (it.hasNext()) json.append(',');
+        }
+        json.append("]}");
+
+        sendJson(ex, 200, json.toString());
+    }
+
+    // 简单的字符串转义方法（您已有的 js 方法可直接复用）
+    private static String jsEscape(String s) {
+        if (s == null) return "null";
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
     }
 
     // ======================================================================
