@@ -71,6 +71,26 @@ public class Webserver {
                     .withZone(ZoneId.of("UTC"));
 
     // ======================================================================
+    // ★ 新增：查询解析结果容器
+    //    stemmedPhrases  — 用于倒排索引候选集检索（词干化后的短语列表）
+    //    exactPhrases    — 引号内的原始文本，用于对 pageText 做精确子串匹配
+    // ======================================================================
+    static class ParsedQuery {
+        /** 全部短语的词干列表（单词查询也封装为单元素列表） */
+        final List<List<String>> stemmedPhrases;
+        /**
+         * 仅引号短语的原始文本（小写、空白归一化），顺序与 stemmedPhrases 中
+         * 对应的短语一致。非引号词不产生 exactPhrase 条目。
+         */
+        final List<String> exactPhrases;
+
+        ParsedQuery(List<List<String>> stemmedPhrases, List<String> exactPhrases) {
+            this.stemmedPhrases = stemmedPhrases;
+            this.exactPhrases   = exactPhrases;
+        }
+    }
+
+    // ======================================================================
     // 启动入口
     // ======================================================================
     @SuppressWarnings("unchecked")
@@ -222,22 +242,30 @@ public class Webserver {
     // ======================================================================
 
     /**
-     * 对原始查询字符串执行检索，返回按 TF-IDF 分值降序排列的结果列表。
+     * 搜索流程：
+     *   Step 1  解析查询 → 得到词干短语列表 + 原始精确短语列表
+     *   Step 2  用词干倒排索引得到候选文档集合
+     *   Step 3  ★ 若查询含引号短语，在候选集中过滤：
+     *              只保留 pageText / pageTitle 原文包含所有精确短语的页面
+     *   Step 4  对过滤后的候选集做 TF-IDF + 短语位置加分
+     *   Step 5  按分值降序返回前 MAX_RESULTS 条
      */
     private static List<SearchResult> search(String rawQuery) {
-        // 1. 将查询解析成若干"短语"（每个短语是一个词干列表）
-        List<List<String>> phrases = parseQuery(rawQuery);
+        // Step 1: 解析查询
+        ParsedQuery parsed = parseQuery(rawQuery);
+        List<List<String>> phrases = parsed.stemmedPhrases;
+        List<String>       exactPhrases = parsed.exactPhrases;
+
         if (phrases.isEmpty()) return Collections.emptyList();
 
-        // 所有去重后的查询词干（用于 TF-IDF）
         List<String> allTerms = phrases.stream()
                 .flatMap(List::stream)
                 .distinct()
                 .collect(Collectors.toList());
 
-        int N = Math.max(webPageDataMap.size(), 1); // 文档总数
+        int N = Math.max(webPageDataMap.size(), 1);
 
-        // 2. 候选文档集 = 各查询词 body + title 倒排列表的并集
+        // Step 2: 词干倒排索引 → 候选集
         Set<Integer> candidates = new HashSet<>();
         for (String term : allTerms) {
             Optional.ofNullable(bodyInverted.get(term))
@@ -247,11 +275,19 @@ public class Webserver {
         }
         if (candidates.isEmpty()) return Collections.emptyList();
 
-        // 3. 对每个候选文档打分
+        // ★ Step 3: 精确短语过滤
+        //    对每个引号短语，要求候选页面的 pageText 或 pageTitle 中
+        //    必须包含该短语的原始文本（大小写不敏感，空白归一化）。
+        //    所有引号短语均须满足（AND 语义）。
+        if (!exactPhrases.isEmpty()) {
+            candidates.removeIf(pid -> !matchesAllExactPhrases(pid, exactPhrases));
+            if (candidates.isEmpty()) return Collections.emptyList();
+        }
+
+        // Step 4: TF-IDF 打分 + 短语位置加分
         Map<Integer, Double> scores = new HashMap<>();
         for (int pid : candidates) {
             double score = tfidfScore(pid, allTerms, N);
-            // 短语查询额外加分
             for (List<String> phrase : phrases) {
                 if (phrase.size() > 1) {
                     score += phraseBonus(pid, phrase);
@@ -260,7 +296,7 @@ public class Webserver {
             if (score > 0) scores.put(pid, score);
         }
 
-        // 4. 按分值降序排列，取前 MAX_RESULTS 条，构建结果对象
+        // Step 5: 排序并构建结果
         return scores.entrySet().stream()
                 .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
                 .limit(MAX_RESULTS)
@@ -348,38 +384,98 @@ public class Webserver {
         return count;
     }
 
+    /**
+     * 判断某页面是否在其正文或标题中包含所有精确短语（AND 语义）。
+     *
+     * 匹配规则：
+     *   - 大小写不敏感
+     *   - 对短语和页面文本均进行空白归一化（连续空白压缩为单个空格），
+     *     避免 HTML 解析产生的多余空白导致漏匹配
+     *   - 子串匹配（短语出现在任意位置即可）
+     *
+     * @param pageId       待检查的页面 ID
+     * @param exactPhrases 所有需要精确匹配的原始短语文本（已小写、空白归一化）
+     * @return 所有短语均能在页面中找到时返回 true，否则返回 false
+     */
+    private static boolean matchesAllExactPhrases(int pageId, List<String> exactPhrases) {
+        String url = pageIdToUrl.get(pageId);
+        if (url == null) return false;
+        WebPageData data = webPageDataMap.get(url);
+        if (data == null) return false;
+
+        // 将正文与标题拼接，统一转小写并压缩空白，作为搜索空间
+        String bodyText  = data.getPageText()  != null ? data.getPageText()  : "";
+        String titleText = data.getPageTitle() != null ? data.getPageTitle() : "";
+        String fullText  = normalizeWhitespace(bodyText + " " + titleText)
+                .toLowerCase(Locale.ROOT);
+
+        for (String phrase : exactPhrases) {
+            // exactPhrases 里的文本在 parseQuery() 时已经做过小写+空白归一化
+            if (!fullText.contains(phrase)) {
+                return false;   // 有一个短语不匹配，直接排除该页面
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 将字符串中连续的空白字符（包括换行、制表符）压缩为单个空格，
+     * 并去除首尾空白。
+     */
+    private static String normalizeWhitespace(String s) {
+        return s.replaceAll("\\s+", " ").trim();
+    }
+
     // ======================================================================
     // 查询解析（分词 → 去停用词 → 词干化）
     // ======================================================================
 
     /**
-     * 将原始查询字符串解析为"短语列表"。
+     * 将原始查询字符串解析为 {@link ParsedQuery}。
      *
      * 示例：
-     *   输入  : java "information retrieval"
-     *   输出  : [["java"], ["inform", "retriev"]]
+     *   输入  : computer science "information retrieval"
+     *   stemmedPhrases : [["comput"], ["scienc"], ["inform", "retriev"]]
+     *   exactPhrases   : ["information retrieval"]   ← 仅引号内的原始文本
      *
-     * 双引号内的词组作为一个整体短语，其余词各自独立。
-     * 所有 token 均经过：小写化 → 去停用词 → Porter 词干化。
+     * 双引号内的短语同时产生：
+     *   (a) 词干化后的短语（放入 stemmedPhrases，供倒排索引检索候选集）
+     *   (b) 原始文本（放入 exactPhrases，供后续精确子串匹配）
+     *
+     * 非引号的单词只产生 (a)，不参与精确过滤。
      */
-    private static List<List<String>> parseQuery(String raw) {
-        List<List<String>> phrases = new ArrayList<>();
+    private static ParsedQuery parseQuery(String raw) {
+        List<List<String>> stemmedPhrases = new ArrayList<>();
+        List<String>       exactPhrases   = new ArrayList<>();
+
         Matcher m = Pattern.compile("\"([^\"]+)\"|([A-Za-z0-9]+)")
                 .matcher(raw.toLowerCase(Locale.ROOT));
+
         while (m.find()) {
-            if (m.group(1) != null) {           // 带引号的短语
-                List<String> phrase = stemTokens(m.group(1));
-                if (!phrase.isEmpty()) phrases.add(phrase);
-            } else {                            // 单个关键词
+            if (m.group(1) != null) {
+                // ── 引号短语 ─────────────────────────────────────────────
+                String originalText = normalizeWhitespace(m.group(1)); // 保留原文（已小写）
+                if (!originalText.isEmpty()) {
+                    // (b) 存入精确短语列表，用于后续 pageText 过滤
+                    exactPhrases.add(originalText);
+                }
+                // (a) 词干化，用于倒排索引候选集检索
+                List<String> stemmed = stemTokens(originalText);
+                if (!stemmed.isEmpty()) {
+                    stemmedPhrases.add(stemmed);
+                }
+            } else {
+                // ── 普通单词 ─────────────────────────────────────────────
                 String token = m.group(2);
                 if (!stopWords.contains(token)) {
                     String stem = porter.stripAffixes(token);
-                    if (stem != null && !stem.isBlank())
-                        phrases.add(Collections.singletonList(stem));
+                    if (stem != null && !stem.isBlank()) {
+                        stemmedPhrases.add(Collections.singletonList(stem));
+                    }
                 }
             }
         }
-        return phrases;
+        return new ParsedQuery(stemmedPhrases, exactPhrases);
     }
 
     /** 对一段文本做分词 + 去停用词 + 词干化，返回词干列表。 */
