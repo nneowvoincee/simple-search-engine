@@ -2,3 +2,4 @@
 out
 .idea
 database.db
+frontend/node_modules
