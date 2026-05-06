@@ -69,3 +69,10 @@ Expected result:
 - spider_result.txt
 - readme.txt
 - db_schema_design.txt
+
+8) Search Engine Setup
+- Run Webserver.java to start the backend api (port 8080)
+- Run `cd frontend/` to root path of frontend
+- Run `npm install`
+- Run `npm start`
+- Open `http://localhost:3000/searchengine` to access the search engine
