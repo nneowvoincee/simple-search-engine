@@ -21,7 +21,7 @@ const loadHistory = () => {
 const saveHistory = (history) => {
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-  } catch { /* 忽略容量错误 */ }
+  } catch { }
 };
 
 export default function SearchEngine() {
@@ -49,6 +49,9 @@ export default function SearchEngine() {
   const fullHeader = 'COMP4321X::SEARCH_ENGINE';
   const inputRef = useRef(null);
 
+  // 标题权重开关，默认开启
+  const [titleBoost, setTitleBoost] = useState(true);
+
   useEffect(() => {
     const t = setInterval(() => setBlink(b => !b), 530);
     return () => clearInterval(t);
@@ -72,7 +75,7 @@ export default function SearchEngine() {
         const data = await res.json();
         setKeywords(data.keywords || []);
       } catch (err) {
-        console.warn('关键词列表加载失败，将从搜索结果累积', err);
+        console.warn('keyword list loading fail', err);
       }
     };
     fetchKeywords();
@@ -90,7 +93,10 @@ export default function SearchEngine() {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(trimmed)}`);
+      // 根据勾选状态添加 titleBoost 参数
+      const res = await fetch(
+        `${API_BASE}/search?q=${encodeURIComponent(trimmed)}&titleBoost=${titleBoost}`
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setAllResults(data.results || []);
@@ -108,10 +114,10 @@ export default function SearchEngine() {
         return updated;
       });
     } catch (err) {
-      setError(`搜索失败: ${err.message}`);
+      setError(`search fail: ${err.message}`);
       setPhase('done');
     }
-  }, []);
+  }, [titleBoost]); // 依赖 titleBoost 以使用最新值
 
   const handleSearch = () => doSearch(query);
 
@@ -162,9 +168,10 @@ export default function SearchEngine() {
     const [q1, q2] = selectedHistory.map(h => h.query);
     setPhase('loading');
     try {
+      // 合并查询同样使用当前的 titleBoost 状态
       const [res1, res2] = await Promise.all([
-        fetch(`${API_BASE}/search?q=${encodeURIComponent(q1)}`),
-        fetch(`${API_BASE}/search?q=${encodeURIComponent(q2)}`)
+        fetch(`${API_BASE}/search?q=${encodeURIComponent(q1)}&titleBoost=${titleBoost}`),
+        fetch(`${API_BASE}/search?q=${encodeURIComponent(q2)}&titleBoost=${titleBoost}`)
       ]);
       const [data1, data2] = await Promise.all([res1.json(), res2.json()]);
       const merged = [...data1.results];
@@ -181,7 +188,7 @@ export default function SearchEngine() {
       setShowHistory(false);
       setSelectedHistory([]);
     } catch (err) {
-      setError('合并搜索失败: ' + err.message);
+      setError('merge search fail: ' + err.message);
       setPhase('done');
     }
   };
@@ -285,7 +292,23 @@ export default function SearchEngine() {
               <Search size={13} /> EXEC
             </motion.button>
           </div>
-          <p className="text-green-600 text-xs mt-2 tracking-wide">// ENTER to execute &nbsp;·&nbsp; partial match supported</p>
+
+          {/* 新增 Title Boost 开关 */}
+          <div className="flex items-center gap-2 mt-2">
+            <label className="flex items-center gap-1.5 text-green-500 text-xs hover:text-green-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={titleBoost}
+                onChange={e => setTitleBoost(e.target.checked)}
+                className="accent-green-500"
+              />
+              Title Boost
+            </label>
+          </div>
+
+          <p className="text-green-600 text-xs mt-1 tracking-wide">
+            // ENTER to execute &nbsp;·&nbsp; partial match supported &nbsp;·&nbsp; titleBoost={String(titleBoost)}
+          </p>
         </div>
 
         {error && (
@@ -353,7 +376,6 @@ export default function SearchEngine() {
 
               <div className="p-4">
                 <p className="text-green-200 font-bold text-sm tracking-wide mb-2 leading-snug">
-
                   <a href={r.url}>{r.title}</a>
                 </p>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-xs">
