@@ -144,9 +144,9 @@ public class Webserver {
         server.createContext("/api/keywords", Webserver::handleKeywords);
         server.setExecutor(null);
         server.start();
-        System.out.println("✅ 服务启动成功: http://localhost:8080");
-        System.out.println("   搜索接口   : GET /api/search?q=<query>&titleBoost=true");
-        System.out.println("   关键词接口 : GET /api/keywords");
+        System.out.println("webserver start at: http://localhost:8080");
+        System.out.println("   search api   : GET /api/search?q=<query>&titleBoost=true");
+        System.out.println("   keyword api : GET /api/keywords");
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (!db.isClosed()) db.close();
@@ -173,7 +173,7 @@ public class Webserver {
 
         String q = getQueryParam(ex, "q");
         if (q == null || q.isBlank()) {
-            sendJson(ex, 400, "{\"error\":\"缺少查询参数 q\"}");
+            sendJson(ex, 400, "{\"error\":\"no keyword q\"}");
             return;
         }
 
