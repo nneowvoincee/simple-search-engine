@@ -156,6 +156,39 @@ public class Crawler {
 
                 currentLayer = nextLayer;
             }
+
+            // ─── Post‑processing: move it HERE, inside the try ───
+            Set<String> validPages = fetchedPages;   // only URLs actually crawled this run
+
+            map.keySet().removeIf(key -> !validPages.contains(key));
+            urlToPageId.keySet().removeIf(key -> !validPages.contains(key));
+            pageIdToUrl.keySet().removeIf(id -> !validPages.contains(pageIdToUrl.get(id)));
+
+            // Clean stale child links
+            for (WebPageData data : map.values()) {
+                Vector<String> links = data.getSubLink();
+                if (links != null) {
+                    links.removeIf(link -> !validPages.contains(link));
+                }
+            }
+
+            // ★ NEW: remove orphaned index data for pageIds not in this crawl
+            Set<Integer> currentPageIds = new HashSet<>();
+            for (String url : validPages) {
+                Integer pid = urlToPageId.get(url);
+                if (pid != null) {
+                    currentPageIds.add(pid);
+                }
+            }
+            // Remove all pageIds from the indexer that are NOT in the current crawl
+            for (Integer id : new HashSet<>(pageIdToUrl.keySet())) {
+                if (!currentPageIds.contains(id)) {
+                    indexer.removePage(id);
+                }
+            }
+
+            db.commit();
+
         } finally {
             executor.shutdown();
             try {
@@ -164,28 +197,6 @@ public class Crawler {
                 Thread.currentThread().interrupt();
             }
         }
-
-        // ─── Post‑processing: remove pages not covered by this crawl ───
-        // All operations from here on are single‑threaded and thus race‑condition free.
-
-        // Determine which pages were successfully crawled (page ID ≤ k)
-        Set<String> validPages = map.keySet().stream()
-                .filter(key -> urlToPageId.get(key) != null && urlToPageId.get(key) <= k)
-                .collect(Collectors.toSet());
-
-        map.keySet().removeIf(key -> !validPages.contains(key));
-        urlToPageId.keySet().removeIf(key -> !validPages.contains(key));
-        pageIdToUrl.keySet().removeIf(id -> !validPages.contains(pageIdToUrl.get(id)));
-
-        // Clean stale child links so they only point to crawled pages
-        for (WebPageData data : map.values()) {
-            Vector<String> links = data.getSubLink();
-            if (links != null) {
-                links.removeIf(link -> !validPages.contains(link));
-            }
-        }
-
-        db.commit();
     }
 
     /**
@@ -215,7 +226,7 @@ public class Crawler {
 
     public static void main(String[] args) {
         Crawler crawler = new Crawler("database.db");
-        crawler.fetchPagesBFS("https://www.cse.ust.hk/~kwtleung/COMP4321/testpage.htm", 300);
+        crawler.fetchPagesBFS("https://www.cse.ust.hk/~kwtleung/COMP4321/Movie/5.html", 30);
         crawler.printAllData();
     }
 }
