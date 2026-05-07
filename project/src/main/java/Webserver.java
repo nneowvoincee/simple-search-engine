@@ -50,9 +50,7 @@ public class Webserver {
 
     // ── 常量 ───────────────────────────────────────────────────────────────
     private static final Pattern WORD_PAT     = Pattern.compile("[A-Za-z0-9]+");
-    /** 标题命中的额外权重倍数（仅当 titleBoost=true 时使用） */
     private static final double  TITLE_WEIGHT = 5.0;
-    /** 短语完整命中时每词每次的额外分值（标题部分同样受 titleBoost 控制） */
     private static final double  PHRASE_BONUS = 5.0;
     private static final int     MAX_RESULTS  = 50;
     private static final int     MAX_KW       = 10;
@@ -226,9 +224,6 @@ public class Webserver {
                 .replace("\t", "\\t");
     }
 
-    // ======================================================================
-    // 核心检索逻辑（增加 titleBoost 开关）
-    // ======================================================================
     private static List<SearchResult> search(String rawQuery, boolean titleBoost) {
         // Step 1: 解析查询
         ParsedQuery parsed = parseQuery(rawQuery);
@@ -303,7 +298,7 @@ public class Webserver {
                 .collect(Collectors.toList());
     }
 
-    // ── TF-IDF 打分（加入 titleBoost 控制） ──────────────────────────────────
+    //TF-IDF
     private static double tfidfScore(int pageId, List<String> terms, int N, boolean titleBoost) {
         Map<String, Integer> bFreq = bodyForward.getOrDefault(pageId,  Collections.emptyMap());
         Map<String, Integer> tFreq = titleForward.getOrDefault(pageId, Collections.emptyMap());
@@ -330,7 +325,7 @@ public class Webserver {
         return normalizedTf * idf;
     }
 
-    // ── 短语加分（标题权重受 titleBoost 控制） ────────────────────────────────
+    //短语加分
     private static double phraseBonus(int pageId, List<String> phrase, boolean titleBoost) {
         int bodyHits  = countPhraseOccurrences(pageId, phrase, bodyInverted);
         int titleHits = countPhraseOccurrences(pageId, phrase, titleInverted);
@@ -362,7 +357,7 @@ public class Webserver {
         return count;
     }
 
-    // ── 精确文本匹配辅助方法 ────────────────────────────────────────────────
+    //精确文本匹配辅助方法
     private static boolean matchesAllExactPhrases(int pageId, List<String> exactPhrases) {
         String url = pageIdToUrl.get(pageId);
         if (url == null) return false;

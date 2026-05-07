@@ -21,7 +21,7 @@ const loadHistory = () => {
 const saveHistory = (history) => {
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
-  } catch { /* 忽略容量错误 */ }
+  } catch { }
 };
 
 export default function SearchEngine() {
@@ -75,7 +75,7 @@ export default function SearchEngine() {
         const data = await res.json();
         setKeywords(data.keywords || []);
       } catch (err) {
-        console.warn('关键词列表加载失败，将从搜索结果累积', err);
+        console.warn('keyword list loading fail', err);
       }
     };
     fetchKeywords();
@@ -114,7 +114,7 @@ export default function SearchEngine() {
         return updated;
       });
     } catch (err) {
-      setError(`搜索失败: ${err.message}`);
+      setError(`search fail: ${err.message}`);
       setPhase('done');
     }
   }, [titleBoost]); // 依赖 titleBoost 以使用最新值
@@ -188,7 +188,7 @@ export default function SearchEngine() {
       setShowHistory(false);
       setSelectedHistory([]);
     } catch (err) {
-      setError('合并搜索失败: ' + err.message);
+      setError('merge search fail: ' + err.message);
       setPhase('done');
     }
   };
