@@ -146,7 +146,7 @@ public class Webserver {
         server.start();
         System.out.println("webserver start at: http://localhost:8080");
         System.out.println("   search api   : GET /api/search?q=<query>&titleBoost=true");
-        System.out.println("   keyword api : GET /api/keywords");
+        System.out.println("   keyword api  : GET /api/keywords");
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             if (!db.isClosed()) db.close();
